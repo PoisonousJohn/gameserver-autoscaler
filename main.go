@@ -3,16 +3,16 @@ package main
 import (
 	"context"
 	"errors"
-	"sync"
 
-	"github.com/Azure-Samples/azure-sdk-for-go-samples/iam"
-	"github.com/Azure/go-autorest/autorest"
-	"github.com/PoisonousJohn/gameserver-autoscaler/batch"
-	// "github.com/subosito/gotenv"
 	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
+
+	"github.com/Azure-Samples/azure-sdk-for-go-samples/iam"
+	azBatch "github.com/Azure/azure-sdk-for-go/services/batch/2017-09-01.6.0/batch"
+	"github.com/Azure/go-autorest/autorest"
+	"github.com/PoisonousJohn/gameserver-autoscaler/batch"
 
 	"gopkg.in/yaml.v2"
 )
@@ -113,39 +113,40 @@ func setAuthEnvVars(conf AppConf) {
 	os.Setenv("AZURE_CLIENT_SECRET", conf.AzureClientSecret)
 }
 
+func toNodeInfo(acc batch.Account, node azBatch.ComputeNode) NodeInfo {
+	var publicIP string
+	endpoints := node.EndpointConfiguration.InboundEndpoints
+	if endpoints != nil && len(*endpoints) > 0 {
+		publicIP = *(*endpoints)[0].PublicIPAddress
+	}
+	return NodeInfo{
+		ID:       *node.ID,
+		acc:      acc,
+		publicIP: publicIP,
+	}
+}
+
+func getAccountNodesInfo(ctx context.Context, acc batch.Account, resultsChan chan<- []NodeInfo) {
+	var result []NodeInfo
+	defer func() { resultsChan <- result }()
+	nodes, err := batch.GetPoolNodes(ctx, acc, poolID)
+	if err != nil {
+		return
+	}
+
+	result = make([]NodeInfo, len(nodes))
+	for index, node := range nodes {
+		result[index] = toNodeInfo(acc, node)
+	}
+}
+
 func getNodesInfo(ctx context.Context, conf AppConf) []NodeInfo {
-	var wg sync.WaitGroup
 	accs := len(conf.BatchAccounts)
 	resultsChan := make(chan []NodeInfo, accs)
 	for _, acc := range conf.BatchAccounts {
-		wg.Add(1)
-		account := acc
-		go func() {
-			var result []NodeInfo
-			defer func() { resultsChan <- result }()
-			defer wg.Done()
-			nodes, err := batch.GetPoolNodes(ctx, account, poolID)
-			if err != nil {
-				return
-			}
-
-			result = make([]NodeInfo, len(nodes))
-			for index, node := range nodes {
-				var publicIP string
-				endpoints := node.EndpointConfiguration.InboundEndpoints
-				if endpoints != nil && len(*endpoints) > 0 {
-					publicIP = *(*endpoints)[0].PublicIPAddress
-				}
-				result[index] = NodeInfo{
-					ID:       *node.ID,
-					acc:      account,
-					publicIP: publicIP,
-				}
-			}
-		}()
+		go getAccountNodesInfo(ctx, acc, resultsChan)
 	}
 
-	wg.Wait()
 	result := make([]NodeInfo, 0)
 	for i := 0; i < accs; i++ {
 		nodes := <-resultsChan
@@ -197,12 +198,7 @@ func main() {
 		return
 	}
 
-	ctx := context.Background()
-
-	info := getNodesInfo(ctx, config)
-	for _, node := range info {
-		logger.Printf("Node: %s -> %s", node.ID, node.publicIP)
-	}
+	// ctx := context.Background()
 
 	// if err = createServerInstance(ctx, config.BatchAccounts[0]); err != nil {
 	// 	// if err = createServerInstance(ctx, batch.Account{}); err != nil {
@@ -211,4 +207,10 @@ func main() {
 	// }
 
 	// logger.Printf("Server instance created")
+
+	// info := getNodesInfo(ctx, config)
+	// for _, node := range info {
+	// 	logger.Printf("Node: %s -> %s", node.ID, node.publicIP)
+	// }
+
 }
