@@ -24,8 +24,8 @@ import (
 
 // Account represents basic credentials for the batch account
 type Account struct {
-	Name     string
-	Location string
+	Name     string `yaml:"Name"`
+	Location string `yaml:"Location"`
 }
 
 const (
@@ -75,6 +75,15 @@ func getFileClient(acc Account) batch.FileClient {
 	fileClient.AddToUserAgent(helpers.UserAgent())
 	fileClient.RequestInspector = fixContentTypeInspector()
 	return fileClient
+}
+
+func getComputeNodeClient(acc Account) batch.ComputeNodeClient {
+	computeNodeClient := batch.NewComputeNodeClientWithBaseURI(getBatchBaseURL(acc))
+	auth, _ := iam.GetBatchAuthorizer(iam.AuthGrantType())
+	computeNodeClient.Authorizer = auth
+	computeNodeClient.AddToUserAgent(helpers.UserAgent())
+	computeNodeClient.RequestInspector = fixContentTypeInspector()
+	return computeNodeClient
 }
 
 // CreateAzureBatchAccount creates a new azure batch account
@@ -158,6 +167,27 @@ func CreateBatchJob(ctx context.Context, acc Account, poolID, jobID string) erro
 
 	return err
 }
+
+func GetPoolNodes(ctx context.Context, acc Account, poolID string) ([]batch.ComputeNode, error) {
+	client := getComputeNodeClient(acc)
+	result, err := client.List(ctx, poolID, "", "", nil, nil, nil, nil, nil)
+
+	return result.Values(), err
+}
+
+// func GetTaskNode(ctx context.Context, acc Account, jobId, taskId string) (*batch.ComputeNode, error) {
+// 	taskClient := getTaskClient(acc)
+// 	result, err := taskClient.Get(ctx, jobId, taskId, "", "", nil, nil, nil, nil, "", "", nil, nil)
+
+// 	if err != nil {
+// 		return nil, err
+// 	}
+
+// 	if result.State != batch.TaskStateRunning {
+// 		return nil, nil
+// 	}
+// 	return nil, nil
+// }
 
 // CreateBatchTask creates a task with specified command
 func CreateBatchTask(ctx context.Context, acc Account, jobID, cmd string) (string, error) {
