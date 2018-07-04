@@ -1,0 +1,157 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"time"
+
+	azBatch "github.com/Azure/azure-sdk-for-go/services/batch/2017-09-01.6.0/batch"
+	"github.com/PoisonousJohn/gameserver-autoscaler/batch"
+)
+
+const jobID = "GameServers"
+const poolID = "GameServers"
+
+var (
+	jobCreated  = false
+	poolCreated = false
+	// key is a node id
+	nodesInfo = make(map[string]NodeInfo)
+)
+
+// CreateServerInstanceRequest represents a struct for the request to create a server instance
+type CreateServerInstanceRequest struct {
+	Region string
+}
+
+// CreateServerInstanceResponse represents a struct for the response
+// of creating a server instance request
+type CreateServerInstanceResponse struct {
+	publicIP string
+	port     string
+}
+
+func (c AppConf) getAccForRegion(region string) *batch.Account {
+	for _, acc := range c.BatchAccounts {
+		if acc.Location == region {
+			return &acc
+		}
+	}
+
+	return nil
+}
+
+func updateNodesInfo(ctx context.Context, conf AppConf) {
+	nodes := getNodesInfo(ctx, conf)
+	for _, node := range nodes {
+		nodesInfo[node.ID] = node
+	}
+}
+
+func getTaskNode(ctx context.Context, conf AppConf, acc batch.Account, taskID string) (*NodeInfo, error) {
+
+	var result azBatch.CloudTask
+	var err error
+	waitCtx, cancel := context.WithTimeout(ctx, time.Second*10)
+	defer cancel()
+	for {
+
+		result, err = batch.GetTask(waitCtx, acc, jobID, taskID)
+
+		_, ok := waitCtx.Deadline()
+
+		if err != nil && ok {
+			return nil, err
+		}
+
+		if result.State == azBatch.TaskStateRunning &&
+			result.NodeInfo != nil &&
+			result.NodeInfo.NodeID != nil {
+			break
+		}
+
+		if !ok {
+			logger.Println("Scheduling the task to a node is failed, deleting the task")
+			err := batch.DeleteTask(ctx, acc, jobID, taskID)
+			if err != nil {
+				return nil, err
+			}
+			return nil, errors.New("Scheduling the task timed out")
+		}
+
+		logger.Println("Task is not on the node, waiting")
+		time.Sleep(time.Second * 1)
+	}
+
+	nodeInfo, exists := nodesInfo[*result.NodeInfo.NodeID]
+
+	if !exists {
+		logger.Printf("node %s was not found, updating", *result.NodeInfo.NodeID)
+		updateNodesInfo(ctx, conf)
+	}
+
+	nodeInfo, exists = nodesInfo[*result.NodeInfo.NodeID]
+
+	if !exists {
+		return nil, errors.New("Task id refers to the node that is not found")
+	}
+
+	return &nodeInfo, nil
+}
+
+func createServiceInstanceHandler(ctx context.Context, conf AppConf, w http.ResponseWriter, r *http.Request) {
+	d := json.NewDecoder(r.Body)
+	var reqObj CreateServerInstanceRequest
+	err := d.Decode(&reqObj)
+	if err != nil {
+		http.Error(w, "Can't decode request", http.StatusBadRequest)
+		return
+	}
+
+	acc := conf.getAccForRegion(reqObj.Region)
+	if acc == nil {
+		http.Error(w, "Couldn't find appropriate account for this region", http.StatusInternalServerError)
+		return
+	}
+
+	logger.Println("Checking the pool")
+	if !poolCreated {
+		err := batch.EnsurePoolExists(ctx, *acc, poolID)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to create a pool: %s", err), http.StatusInternalServerError)
+			return
+		}
+		poolCreated = true
+	}
+
+	logger.Println("Checking the job")
+	if !jobCreated {
+		err := batch.EnsureJobExists(ctx, *acc, poolID, jobID)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to create a job: %s", err), http.StatusInternalServerError)
+			return
+		}
+		jobCreated = true
+	}
+
+	logger.Println("Creating the task")
+	taskID, err := batch.CreateBatchTask(ctx, *acc, jobID, "/bin/bash -c 'echo \"hello\"'")
+
+	logger.Println("Getting task's node")
+	var node *NodeInfo
+	node, err = getTaskNode(ctx, conf, *acc, taskID)
+
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get server ip: %s", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	resp := CreateServerInstanceResponse{
+		publicIP: node.publicIP,
+	}
+	json.NewEncoder(w).Encode(&resp)
+}

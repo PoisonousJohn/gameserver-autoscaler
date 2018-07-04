@@ -10,7 +10,9 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/Azure-Samples/azure-sdk-for-go-samples/helpers"
@@ -20,6 +22,10 @@ import (
 	"github.com/Azure/go-autorest/autorest"
 	"github.com/Azure/go-autorest/autorest/to"
 	uuid "github.com/satori/go.uuid"
+)
+
+var (
+	logger = log.New(os.Stdout, "[batch] ", log.Lshortfile)
 )
 
 // Account represents basic credentials for the batch account
@@ -86,32 +92,6 @@ func getComputeNodeClient(acc Account) batch.ComputeNodeClient {
 	return computeNodeClient
 }
 
-// CreateAzureBatchAccount creates a new azure batch account
-func CreateAzureBatchAccount(ctx context.Context, accountName, location, resourceGroupName string) (a batchARM.Account, err error) {
-	accountClient := getAccountClient()
-	res, err := accountClient.Create(ctx, resourceGroupName, accountName, batchARM.AccountCreateParameters{
-		Location: to.StringPtr(location),
-	})
-
-	if err != nil {
-		return a, err
-	}
-
-	err = res.WaitForCompletion(ctx, accountClient.Client)
-
-	if err != nil {
-		return batchARM.Account{}, fmt.Errorf("failed waiting for account creation: %v", err)
-	}
-
-	account, err := res.Result(accountClient)
-
-	if err != nil {
-		return a, fmt.Errorf("failed retreiving for account: %v", err)
-	}
-
-	return account, nil
-}
-
 // CreateBatchPool creates an Azure Batch compute pool
 func CreateBatchPool(ctx context.Context, acc Account, poolID string) error {
 	poolClient := getPoolClient(acc)
@@ -154,7 +134,7 @@ func CreateBatchPool(ctx context.Context, acc Account, poolID string) error {
 	return err
 }
 
-// CreateBatchJob create an azure batch job
+// CreateBatchJob creates an azure batch job
 func CreateBatchJob(ctx context.Context, acc Account, poolID, jobID string) error {
 	jobClient := getJobClient(acc)
 	jobToCreate := batch.JobAddParameter{
@@ -168,26 +148,13 @@ func CreateBatchJob(ctx context.Context, acc Account, poolID, jobID string) erro
 	return err
 }
 
+// GetPoolNodes returns an []batch.ComputeNode for the specificed account
 func GetPoolNodes(ctx context.Context, acc Account, poolID string) ([]batch.ComputeNode, error) {
 	client := getComputeNodeClient(acc)
 	result, err := client.List(ctx, poolID, "", "", nil, nil, nil, nil, nil)
 
 	return result.Values(), err
 }
-
-// func GetTaskNode(ctx context.Context, acc Account, jobId, taskId string) (*batch.ComputeNode, error) {
-// 	taskClient := getTaskClient(acc)
-// 	result, err := taskClient.Get(ctx, jobId, taskId, "", "", nil, nil, nil, nil, "", "", nil, nil)
-
-// 	if err != nil {
-// 		return nil, err
-// 	}
-
-// 	if result.State != batch.TaskStateRunning {
-// 		return nil, nil
-// 	}
-// 	return nil, nil
-// }
 
 // CreateBatchTask creates a task with specified command
 func CreateBatchTask(ctx context.Context, acc Account, jobID, cmd string) (string, error) {
@@ -211,6 +178,64 @@ func CreateBatchTask(ctx context.Context, acc Account, jobID, cmd string) (strin
 	}
 
 	return taskID, nil
+}
+
+// EnsurePoolExists creates the pool required for running game servers, if it doesn't exist
+func EnsurePoolExists(ctx context.Context, acc Account, poolID string) error {
+	logger.Printf("Creating pool")
+	err := CreateBatchPool(ctx, acc, poolID)
+	if err != nil {
+		detailedErr := err.(autorest.DetailedError)
+
+		// pool already exists
+		if detailedErr.StatusCode == 409 {
+			err = nil
+		}
+	}
+	if err == nil {
+		logger.Printf("Pool created")
+	}
+
+	return err
+}
+
+// EnsureJobExists creates the job required for running game servers, if it doesn't exist
+func EnsureJobExists(ctx context.Context, acc Account, poolID string, jobID string) error {
+	logger.Printf("Creating job")
+	err := CreateBatchJob(ctx, acc, poolID, jobID)
+
+	if err != nil {
+		detailedErr := err.(autorest.DetailedError)
+
+		// pool already exists
+		if detailedErr.StatusCode == 409 {
+			err = nil
+		}
+	}
+
+	if err == nil {
+		logger.Printf("Job created")
+	}
+
+	return err
+}
+
+// DeleteTask well... deletes the task. If the task doesn't exist, it's not an error
+func DeleteTask(ctx context.Context, acc Account, jobID, taskID string) error {
+	taskClient := getTaskClient(acc)
+	resp, err := taskClient.Delete(ctx, jobID, taskID, nil, nil, nil, nil, "", "", nil, nil)
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+
+	return err
+}
+
+// GetTask returns a task
+func GetTask(ctx context.Context, acc Account, jobID, taskID string) (batch.CloudTask, error) {
+	taskClient := getTaskClient(acc)
+	return taskClient.Get(ctx, jobID, taskID, "", "", nil, nil, nil, nil, "", "", nil, nil)
 }
 
 // WaitForTaskResult polls the task and retreives it's stdout once it has completed
@@ -274,3 +299,29 @@ func fixContentTypeInspector() autorest.PrepareDecorator {
 		})
 	}
 }
+
+// CreateAzureBatchAccount creates a new azure batch account
+// func CreateAzureBatchAccount(ctx context.Context, accountName, location, resourceGroupName string) (a batchARM.Account, err error) {
+// 	accountClient := getAccountClient()
+// 	res, err := accountClient.Create(ctx, resourceGroupName, accountName, batchARM.AccountCreateParameters{
+// 		Location: to.StringPtr(location),
+// 	})
+
+// 	if err != nil {
+// 		return a, err
+// 	}
+
+// 	err = res.WaitForCompletion(ctx, accountClient.Client)
+
+// 	if err != nil {
+// 		return batchARM.Account{}, fmt.Errorf("failed waiting for account creation: %v", err)
+// 	}
+
+// 	account, err := res.Result(accountClient)
+
+// 	if err != nil {
+// 		return a, fmt.Errorf("failed retreiving for account: %v", err)
+// 	}
+
+// 	return account, nil
+// }
