@@ -61,9 +61,7 @@ func getTaskNode(ctx context.Context, conf AppConf, acc batch.Account, taskID st
 
 		result, err = batch.GetTask(waitCtx, acc, jobID, taskID)
 
-		_, ok := waitCtx.Deadline()
-
-		if err != nil && ok {
+		if err != nil {
 			return nil, err
 		}
 
@@ -73,17 +71,17 @@ func getTaskNode(ctx context.Context, conf AppConf, acc batch.Account, taskID st
 			break
 		}
 
-		if !ok {
-			logger.Println("Scheduling the task to a node is failed, deleting the task")
-			err := batch.DeleteTask(ctx, acc, jobID, taskID)
+		select {
+		case <-waitCtx.Done():
+			logger.Println("Scheduling the task to a node is timed out, deleting the task")
+			err = batch.DeleteTask(ctx, acc, jobID, taskID)
 			if err != nil {
 				return nil, err
 			}
-			return nil, errors.New("Scheduling the task timed out")
+			return nil, errors.New("Creating the service timed out")
+		case <-time.After(time.Second * 1):
+			logger.Println("Task is not on the node, waiting")
 		}
-
-		logger.Println("Task is not on the node, waiting")
-		time.Sleep(time.Second * 1)
 	}
 
 	nodeInfo, exists := nodesInfo[*result.NodeInfo.NodeID]
