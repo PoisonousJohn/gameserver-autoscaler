@@ -16,7 +16,7 @@ import (
 )
 
 var (
-	logger = log.New(os.Stdout, "[main] ", log.Lshortfile)
+	logger = log.New(os.Stdout, "[main] ", log.Ltime|log.Lmicroseconds|log.Lshortfile)
 )
 
 func main() {

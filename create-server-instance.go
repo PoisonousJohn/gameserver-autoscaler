@@ -30,8 +30,8 @@ type CreateServerInstanceRequest struct {
 // CreateServerInstanceResponse represents a struct for the response
 // of creating a server instance request
 type CreateServerInstanceResponse struct {
-	publicIP string
-	port     string
+	PublicIP string `json:"publicIP"`
+	Port     string `json:"port"`
 }
 
 func (c AppConf) getAccForRegion(region string) *batch.Account {
@@ -47,15 +47,18 @@ func (c AppConf) getAccForRegion(region string) *batch.Account {
 func updateNodesInfo(ctx context.Context, conf AppConf) {
 	nodes := getNodesInfo(ctx, conf)
 	for _, node := range nodes {
+		logger.Printf("Found node %s", node.ID)
 		nodesInfo[node.ID] = node
 	}
+
+	logger.Printf("Updated nodes info. Total count %d", len(nodesInfo))
 }
 
 func getTaskNode(ctx context.Context, conf AppConf, acc batch.Account, taskID string) (*NodeInfo, error) {
 
 	var result azBatch.CloudTask
 	var err error
-	waitCtx, cancel := context.WithTimeout(ctx, time.Second*10)
+	waitCtx, cancel := context.WithTimeout(ctx, time.Minute*3)
 	defer cancel()
 	for {
 
@@ -79,7 +82,7 @@ func getTaskNode(ctx context.Context, conf AppConf, acc batch.Account, taskID st
 				return nil, err
 			}
 			return nil, errors.New("Creating the service timed out")
-		case <-time.After(time.Second * 1):
+		case <-time.After(time.Millisecond * 500):
 			logger.Println("Task is not on the node, waiting")
 		}
 	}
@@ -94,13 +97,15 @@ func getTaskNode(ctx context.Context, conf AppConf, acc batch.Account, taskID st
 	nodeInfo, exists = nodesInfo[*result.NodeInfo.NodeID]
 
 	if !exists {
-		return nil, errors.New("Task id refers to the node that is not found")
+		return nil, errors.New("Task id refers to the node that was not found")
 	}
 
 	return &nodeInfo, nil
 }
 
 func createServiceInstanceHandler(ctx context.Context, conf AppConf, w http.ResponseWriter, r *http.Request) {
+	startTime := time.Now()
+
 	d := json.NewDecoder(r.Body)
 	var reqObj CreateServerInstanceRequest
 	err := d.Decode(&reqObj)
@@ -136,7 +141,7 @@ func createServiceInstanceHandler(ctx context.Context, conf AppConf, w http.Resp
 	}
 
 	logger.Println("Creating the task")
-	taskID, err := batch.CreateBatchTask(ctx, *acc, jobID, "/bin/bash -c 'echo \"hello\"'")
+	taskID, err := batch.CreateBatchTask(ctx, *acc, jobID, "/bin/bash -c 'sleep 10'")
 
 	logger.Println("Getting task's node")
 	var node *NodeInfo
@@ -149,7 +154,10 @@ func createServiceInstanceHandler(ctx context.Context, conf AppConf, w http.Resp
 
 	w.Header().Set("Content-Type", "application/json")
 	resp := CreateServerInstanceResponse{
-		publicIP: node.publicIP,
+		PublicIP: node.publicIP,
 	}
 	json.NewEncoder(w).Encode(&resp)
+
+	elapsedTime := time.Since(startTime)
+	logger.Printf("Created server instance in %s", elapsedTime)
 }
